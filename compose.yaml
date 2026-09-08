@@ -1,0 +1,30 @@
+services:
+  identity-provider:
+    build: .
+    environment:
+      ANON_IDENTITY_DATABASE: /data/identity.db
+      ANON_IDENTITY_ISSUER_SECRET: ${ANON_IDENTITY_ISSUER_SECRET:-development-only-secret-change-before-deployment}
+    ports:
+      - "8000:8000"
+    volumes:
+      - provider-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  demo-service:
+    build: .
+    command: ["uvicorn", "anon_identity.demo_service:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      ANON_IDENTITY_ISSUER_SECRET: ${ANON_IDENTITY_ISSUER_SECRET:-development-only-secret-change-before-deployment}
+      DEMO_SERVICE_ID: forum.com
+    ports:
+      - "8001:8001"
+    depends_on:
+      identity-provider:
+        condition: service_healthy
+
+volumes:
+  provider-data:

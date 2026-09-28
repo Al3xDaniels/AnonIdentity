@@ -22,9 +22,43 @@ services:
       DEMO_SERVICE_ID: forum.com
     ports:
       - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    depends_on:
+      identity-provider:
+        condition: service_healthy
+
+  visual-demo:
+    build: .
+    command: ["uvicorn", "anon_identity.web_demo:app", "--host", "0.0.0.0", "--port", "8002"]
+    environment:
+      ANON_IDENTITY_DEMO_DATABASE: /data/web-demo.db
+      ANON_IDENTITY_ISSUER_SECRET: ${ANON_IDENTITY_ISSUER_SECRET:-development-only-secret-change-before-deployment}
+    ports:
+      - "8002:8002"
+    volumes:
+      - visual-demo-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  wallet-cli:
+    build: .
+    entrypoint: ["anon-wallet"]
+    working_dir: /wallet
+    profiles: ["tools"]
+    volumes:
+      - wallet-demo-data:/wallet
     depends_on:
       identity-provider:
         condition: service_healthy
 
 volumes:
   provider-data:
+  visual-demo-data:
+  wallet-demo-data:

@@ -6,36 +6,45 @@ wallet, and completes a pairwise login.
 ## Prerequisites
 
 - Docker with Docker Compose
-- Python 3.11 or newer
 
 ## Start the services
 
-Create a virtual environment, install the wallet CLI, and start the containers:
+Build and start the identity provider, relying service, and visual demo:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-docker compose up --build
+docker compose up --build --wait
 ```
 
 The local endpoints are:
 
+- Visual protocol demo: <http://localhost:8002>
 - Identity provider API: <http://localhost:8000/docs>
 - Demo `forum.com` service: <http://localhost:8001/docs>
 
+The visual demo creates an ephemeral wallet in its own process and walks through
+real enrollment, challenge signing, token issuance, and audience validation for
+two services. This server-side wallet is only a POC convenience; a production
+browser flow must perform wallet operations on the user's device.
+
 ## Create and enroll a wallet
 
-In another terminal, create the wallet and write its recovery phrase to an
-owner-readable file:
+The `wallet-cli` Compose service stores demo wallet files in a Docker volume.
+Create an encrypted wallet and enroll its public key with the containerized
+provider:
 
 ```bash
-.venv/bin/anon-wallet create alice.wallet.json --recovery-output alice.recovery.txt
-.venv/bin/anon-wallet enroll alice.wallet.json --recovery-phrase-file alice.recovery.txt
+docker compose --profile tools run --rm wallet-cli \
+  create alice.wallet.json --recovery-output alice.recovery.txt
+docker compose --profile tools run --rm wallet-cli \
+  enroll alice.wallet.json \
+  --recovery-phrase-file alice.recovery.txt \
+  --provider http://identity-provider:8000
 ```
 
 Store the 24-word phrase separately from the encrypted wallet. Anyone with the
-phrase controls the identity. The example recovery filename is ignored by Git,
-but an offline backup is safer than leaving both files together.
+phrase controls the identity. Keeping both files in one Docker volume is suitable
+only for this demonstration; production recovery material needs a separate,
+offline backup.
 
 When `--recovery-phrase-file` is omitted, the CLI uses
 `ANON_IDENTITY_RECOVERY_PHRASE` if set or prompts without echoing the phrase.
@@ -43,9 +52,11 @@ When `--recovery-phrase-file` is omitted, the CLI uses
 ## Complete a login
 
 ```bash
-TOKEN=$(.venv/bin/anon-wallet login alice.wallet.json \
+TOKEN=$(docker compose --profile tools run --rm --no-TTY wallet-cli \
+  login alice.wallet.json \
   --recovery-phrase-file alice.recovery.txt \
   --service forum.com \
+  --provider http://identity-provider:8000 \
   --token-only)
 
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8001/session
@@ -55,7 +66,8 @@ The service response contains `forum.com` and its pairwise anonymous subject. To
 inspect locally recorded service metadata:
 
 ```bash
-.venv/bin/anon-wallet services alice.wallet.json \
+docker compose --profile tools run --rm wallet-cli \
+  services alice.wallet.json \
   --recovery-phrase-file alice.recovery.txt
 ```
 
@@ -66,7 +78,8 @@ phrase-only restore starts with an empty service catalog because labels and
 timestamps are not derivable:
 
 ```bash
-.venv/bin/anon-wallet restore restored.wallet.json \
+docker compose --profile tools run --rm wallet-cli \
+  restore restored.wallet.json \
   --recovery-phrase-file alice.recovery.txt
 ```
 
@@ -75,7 +88,8 @@ timestamps are not derivable:
 Encrypt an older prototype wallet in place while preserving its root identity:
 
 ```bash
-.venv/bin/anon-wallet migrate old.wallet.json \
+docker compose --profile tools run --rm wallet-cli \
+  migrate old.wallet.json \
   --recovery-output old.recovery.txt
 ```
 
@@ -105,9 +119,18 @@ manually:
   --recovery-phrase-file alice.recovery.txt
 ```
 
-## Run the tests
+KDE Wallet integration intentionally runs on the host because it needs the
+user's desktop D-Bus session. Install the local development environment before
+using those two commands.
+
+## Optional local development
+
+Docker runs every portable demo component. A local environment is needed only
+for development, tests, or host desktop integrations such as KDE Wallet:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
 ```
 
@@ -118,4 +141,5 @@ docker compose down
 ```
 
 Use `docker compose down -v` only when the provider's SQLite volume should also
-be deleted.
+be deleted. It also removes the visual-demo database and containerized demo
+wallet when the `wallet-demo-data` volume is included.

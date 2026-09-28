@@ -10,11 +10,11 @@ COPY src ./src
 
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data \
-    && chown appuser:appuser /data
+    && mkdir -p /data /wallet \
+    && chown appuser:appuser /data /wallet
 
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8000 8001 8002
 
 CMD ["uvicorn", "anon_identity.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

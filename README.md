@@ -28,6 +28,32 @@ root secret and recovery material. Services receive only a deterministic identit
 created for their own domain. The provider verifies proofs and issues scoped,
 short-lived tokens without receiving the root secret.
 
+## Security-first design
+
+Encryption is a core boundary, not an optional storage feature:
+
+- **At rest:** the wallet root, service metadata, and future credentials are
+	stored only inside an AES-256-GCM authenticated envelope. A per-write random
+	salt and nonce are used, and scrypt derives the encryption key from the
+	recovery phrase.
+- **In transit:** production deployments must use authenticated TLS for every
+	wallet, provider, issuer, and service connection. Application signatures do
+	not replace transport security.
+- **During synchronization:** future sync services should receive only opaque
+	encrypted wallet envelopes. Decryption keys and recovery phrases must remain
+	on user-controlled devices.
+- **In use:** decrypted secrets should exist only as long as needed and should
+	use platform secure storage or hardware-backed keys where available. The
+	current Python prototype cannot guarantee protection from a compromised or
+	unlocked device.
+
+The project uses reviewed cryptographic primitives from established libraries
+and does not invent encryption algorithms. Any production release would still
+require protocol review, implementation audit, hardened key lifecycle handling,
+and tested backup, rollback, rotation, and device-revocation procedures. See the
+[encrypted wallet threat model](docs/wallet-format.md) for the precise guarantees
+and limitations implemented today.
+
 ## Core idea
 
 One wallet can produce stable identities that are different across services:
@@ -216,6 +242,14 @@ encrypted multi-device use:
 - [Getting started and command reference](docs/getting-started.md)
 - [Encrypted wallet format and threat model](docs/wallet-format.md)
 - [Age assurance design](docs/age-verification.md)
+
+## Visual demo
+
+Run `docker compose up --build --wait` and open <http://localhost:8002>. The
+interactive POC uses the real wallet derivation, provider challenge, proof
+verification, token issuance, and service audience checks to show one wallet
+receiving unrelated identities at two services. The provider API and standalone
+relying-service demo run beside it in the same Compose stack.
 
 ## Contributing and license
 

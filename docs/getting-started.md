@@ -26,6 +26,13 @@ real enrollment, challenge signing, token issuance, and audience validation for
 two services. This server-side wallet is only a POC convenience; a production
 browser flow must perform wallet operations on the user's device.
 
+To run the age-assurance flow, create a temporary wallet, select **Simulate
+document check**, request `age_over_18`, and approve the service-bound request.
+The wallet inspector shows the credential metadata entering the encrypted wallet
+without exposing its opaque payload. This flow uses a demo-only HMAC adapter and
+does not claim BBS proofs, anonymous holder binding, or cryptographic
+unlinkability.
+
 ## Create and enroll a wallet
 
 The `wallet-cli` Compose service stores demo wallet files in a Docker volume.

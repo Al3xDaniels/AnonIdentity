@@ -17,6 +17,8 @@ def test_visual_demo_serves_interactive_page(tmp_path) -> None:
     assert "shop.example" in response.text
     assert "Current wallet state" in response.text
     assert "Approve in bridge terminal" in response.text
+    assert "Prove a threshold, not a birth date" in response.text
+    assert "not cryptographically unlinkable" in response.text
 
 
 def test_visual_demo_produces_stable_distinct_service_identities(tmp_path) -> None:
@@ -99,3 +101,44 @@ def test_connected_wallet_completes_provider_flow(tmp_path) -> None:
         "service_id": "forum.example",
         "subject": proof.subject,
     }
+
+
+def test_demo_age_flow_issues_persists_and_verifies_once(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "demo.db"), ISSUER_SECRET))
+    wallet = client.post("/api/demo/wallet").json()
+
+    issued = client.post(
+        "/api/demo/age/credentials",
+        json={"demo_session": wallet["demo_session"]},
+    )
+    proof_request = client.post(
+        "/api/demo/age/requests",
+        json={
+            "demo_session": wallet["demo_session"],
+            "service_id": "shop.example",
+            "minimum_age": 18,
+        },
+    )
+    presentation_payload = {
+        "demo_session": wallet["demo_session"],
+        "request_id": proof_request.json()["request_id"],
+    }
+    presented = client.post("/api/demo/age/presentations", json=presentation_payload)
+    replay = client.post("/api/demo/age/presentations", json=presentation_payload)
+
+    assert issued.status_code == proof_request.status_code == 201
+    assert issued.json()["wallet_state"]["revision"] == 2
+    assert issued.json()["wallet_state"]["logical"]["age_credentials"][0]["age_over"] == [
+        13,
+        16,
+        18,
+        21,
+    ]
+    assert "credential" not in issued.json()["wallet_state"]["logical"]["age_credentials"][0]
+    assert presented.status_code == 200
+    assert presented.json()["claim"] == "age_over_18"
+    assert presented.json()["value"] is True
+    assert presented.json()["mode"] == "simulated"
+    assert presented.json()["security"] == "not cryptographically unlinkable"
+    assert replay.status_code == 400
+    assert replay.json()["detail"] == "age presentation request was already consumed"

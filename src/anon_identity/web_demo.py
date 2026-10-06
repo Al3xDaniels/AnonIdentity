@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -12,9 +13,25 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from anon_identity.cli import load_wallet, record_service, save_wallet
+from anon_identity.age_assurance import (
+  AgeAssuranceError,
+  AgeProofRequest,
+  AgeTrustPolicy,
+  select_age_credential,
+)
+from anon_identity.cli import (
+  load_age_credentials,
+  load_wallet,
+  record_age_credential,
+  record_service,
+  save_wallet,
+)
 from anon_identity.demo_service import validate_token
 from anon_identity.provider import AuthenticationError, IdentityProvider
+from anon_identity.simulated_age_provider import (
+  SIMULATED_FORMAT,
+  SimulatedAgeCredentialProvider,
+)
 from anon_identity.wallet import Wallet, WalletProof, encode_bytes
 from anon_identity.wallet_encryption import (
     decrypt_wallet_document,
@@ -42,6 +59,21 @@ class ConnectedProofRequest(BaseModel):
     challenge_signature: str
 
 
+class DemoAgeRequest(BaseModel):
+    demo_session: str
+    service_id: str
+    minimum_age: int
+
+
+class DemoAgeCredentialRequest(BaseModel):
+  demo_session: str
+
+
+class DemoAgePresentationRequest(BaseModel):
+    demo_session: str
+    request_id: str
+
+
 def _short(value: str, visible: int = 12) -> str:
     return value if len(value) <= visible * 2 else f"{value[:visible]}...{value[-visible:]}"
 
@@ -50,11 +82,16 @@ def _wallet_views(path: Path, recovery_phrase: str, wallet: Wallet) -> dict[str,
     envelope = json.loads(path.read_text())
     document = decrypt_wallet_document(envelope, recovery_phrase)
     encrypted_view = {**envelope, "ciphertext": _short(envelope["ciphertext"], 24)}
+    age_credentials = [
+        {key: value for key, value in credential.items() if key != "credential"}
+        for credential in document.get("age_credentials", [])
+    ]
     return {
         "revision": envelope["revision"],
         "logical": {
             "wallet_id": wallet.wallet_id,
             "services": document.get("services", {}),
+            "age_credentials": age_credentials,
             "root_secret": "[hidden]",
         },
         "encrypted": encrypted_view,
@@ -73,9 +110,17 @@ def create_app(
         "development-only-secret-change-before-deployment",
     )
     provider = IdentityProvider(resolved_database, resolved_secret)
+    age_provider = SimulatedAgeCredentialProvider(f"{resolved_secret}:age-demo")
+    age_policy = AgeTrustPolicy(
+        trusted_issuers=(age_provider.issuer,),
+        accepted_formats=(SIMULATED_FORMAT,),
+        accepted_assurance_levels=(age_provider.assurance_level,),
+        accepted_jurisdictions=(age_provider.jurisdiction,),
+    )
     wallet_directory = Path(resolved_database).parent / "demo-wallets"
     wallet_directory.mkdir(parents=True, exist_ok=True)
     wallets: dict[str, tuple[Path, str]] = {}
+    age_requests: dict[str, tuple[str, AgeProofRequest]] = {}
     app = FastAPI(title="Anonymous Identity Visual Demo", version="0.1.0")
 
     @app.get("/", response_class=HTMLResponse)
@@ -156,6 +201,87 @@ def create_app(
                 key: _short(value) for key, value in asdict(proof).items()
             },
             "wallet_state": _wallet_views(wallet_file, phrase, wallet),
+        }
+
+    @app.post("/api/demo/age/credentials", status_code=status.HTTP_201_CREATED)
+    def issue_demo_age_credential(request: DemoAgeCredentialRequest) -> dict[str, object]:
+        stored_wallet = wallets.get(request.demo_session)
+        if stored_wallet is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo wallet has expired")
+        wallet_file, phrase = stored_wallet
+        credential = age_provider.issue(frozenset({13, 16, 18, 21}))
+        record_age_credential(wallet_file, phrase, credential)
+        wallet = load_wallet(wallet_file, phrase)
+        return {
+            "issuer": credential.issuer,
+            "age_over": sorted(credential.age_over),
+            "expires_at": credential.expires_at,
+            "mode": "simulated",
+            "security": "not cryptographically unlinkable",
+            "wallet_state": _wallet_views(wallet_file, phrase, wallet),
+        }
+
+    @app.post("/api/demo/age/requests", status_code=status.HTTP_201_CREATED)
+    def create_demo_age_request(request: DemoAgeRequest) -> dict[str, object]:
+        if request.demo_session not in wallets:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo wallet has expired")
+        now = int(time.time())
+        try:
+            proof_request = AgeProofRequest(
+                service_id=request.service_id,
+                minimum_age=request.minimum_age,
+                nonce=secrets.token_urlsafe(24),
+                expires_at=now + 120,
+                policy=age_policy,
+            )
+        except AgeAssuranceError as error:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+        request_id = secrets.token_urlsafe(18)
+        age_requests[request_id] = (request.demo_session, proof_request)
+        return {
+            "request_id": request_id,
+            "service_id": proof_request.service_id,
+            "minimum_age": proof_request.minimum_age,
+            "expires_at": proof_request.expires_at,
+            "issuer": age_provider.issuer,
+        }
+
+    @app.post("/api/demo/age/presentations")
+    def present_demo_age_proof(
+        request: DemoAgePresentationRequest,
+    ) -> dict[str, object]:
+        stored_wallet = wallets.get(request.demo_session)
+        stored_request = age_requests.get(request.request_id)
+        if stored_wallet is None or stored_request is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo age request has expired")
+        request_session, proof_request = stored_request
+        if request_session != request.demo_session:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Age request belongs to another wallet")
+        wallet_file, phrase = stored_wallet
+        try:
+            credential = select_age_credential(
+                load_age_credentials(wallet_file, phrase),
+                proof_request,
+            )
+            presentation = age_provider.create_presentation(credential, proof_request)
+            verified = age_provider.verify_presentation(presentation, proof_request)
+        except AgeAssuranceError as error:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+        return {
+            "service_id": verified.service_id,
+            "claim": f"age_over_{verified.minimum_age}",
+            "value": True,
+            "issuer": verified.issuer,
+            "assurance_level": verified.assurance_level,
+            "jurisdiction": verified.jurisdiction,
+            "mode": "simulated",
+            "security": "not cryptographically unlinkable",
+            "steps": [
+                {"label": "Policy matched", "detail": "Wallet selected a trusted credential locally"},
+                {"label": "Consent granted", "detail": f"Only age_over_{verified.minimum_age} was requested"},
+                {"label": "Presentation derived", "detail": "Fresh demo token bound to audience and nonce"},
+                {"label": "Proof accepted", "detail": "Verifier consumed the one-time request"},
+            ],
         }
 
     @app.post("/api/connected/challenge", status_code=status.HTTP_201_CREATED)
@@ -268,6 +394,14 @@ DEMO_HTML = r"""<!doctype html>
     .identity span { color: var(--muted); font-size: 11px; text-transform: uppercase; }
     .identity code { display: block; margin-top: 7px; color: var(--green); font-size: 12px; font-weight: 700; }
     .comparison { display: none; margin: 18px 0 0; padding: 15px 18px; border: 1px solid var(--green); background: var(--green-soft); border-radius: 6px; color: #0e5941; font-weight: 700; }
+    .age-demo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .8fr); gap: 28px; margin-top: 18px; padding: 24px; border-top: 5px solid var(--coral); }
+    .age-demo h2 { margin-bottom: 8px; }
+    .age-copy { max-width: 620px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .age-warning { margin-top: 16px; padding: 10px 12px; border-left: 3px solid var(--yellow); background: #fff9df; font: 700 12px/1.45 "IBM Plex Mono", "Liberation Mono", monospace; }
+    .age-actions { display: grid; gap: 9px; align-content: center; }
+    .age-actions button { min-height: 42px; border-radius: 4px; font-weight: 700; cursor: pointer; }
+    .age-state { min-height: 20px; margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .age-result { color: var(--green); font-weight: 700; }
     .wallet-inspector { margin-top: 18px; overflow: hidden; }
     .inspector-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 22px 24px; border-bottom: 1px solid var(--line); }
     .inspector-head h2 { margin: 8px 0 0; }
@@ -302,6 +436,7 @@ DEMO_HTML = r"""<!doctype html>
       .workspace { grid-template-columns: 1fr; }
       .wallet { min-height: 300px; }
       .services { grid-template-columns: 1fr; }
+      .age-demo { grid-template-columns: 1fr; }
       .inspector-head { align-items: flex-start; }
       .inspector-grid { grid-template-columns: 1fr; }
       .json-lines { min-height: 190px; max-height: 330px; }
@@ -360,6 +495,21 @@ DEMO_HTML = r"""<!doctype html>
 
     <div class="comparison" id="comparison">Verified: both services received stable but different anonymous subjects.</div>
 
+    <section class="panel age-demo">
+      <div>
+        <div class="panel-label">Age assurance lab</div>
+        <h2>Prove a threshold, not a birth date</h2>
+        <p class="age-copy">The demo issuer returns reusable age predicates. The wallet releases only the threshold requested by shop.example after explicit approval.</p>
+        <div class="age-warning">Simulation only: this HMAC adapter is not BBS and is not cryptographically unlinkable.</div>
+      </div>
+      <div class="age-actions">
+        <button class="primary" id="issue-age" disabled>Simulate document check</button>
+        <button class="secondary" id="request-age" disabled>Request age_over_18</button>
+        <button class="primary" id="approve-age" hidden>Approve for shop.example</button>
+        <p class="age-state" id="age-state">Create a temporary wallet to begin.</p>
+      </div>
+    </section>
+
     <section class="panel wallet-inspector" id="wallet-inspector">
       <div class="inspector-head">
         <div><div class="panel-label">Wallet write monitor</div><h2>Current wallet state</h2></div>
@@ -400,6 +550,21 @@ DEMO_HTML = r"""<!doctype html>
     const createButton = document.querySelector('#create-wallet');
     const connectButton = document.querySelector('#connect-wallet');
     const serviceButtons = [...document.querySelectorAll('[data-service]')];
+    const issueAgeButton = document.querySelector('#issue-age');
+    const requestAgeButton = document.querySelector('#request-age');
+    const approveAgeButton = document.querySelector('#approve-age');
+    let pendingAgeRequest = null;
+
+    function resetAgeDemo() {
+      pendingAgeRequest = null;
+      issueAgeButton.disabled = walletMode !== 'temporary';
+      requestAgeButton.disabled = true;
+      approveAgeButton.hidden = true;
+      document.querySelector('#age-state').className = 'age-state';
+      document.querySelector('#age-state').textContent = walletMode === 'temporary'
+        ? 'Ready to simulate an issuer document check.'
+        : 'Age assurance is available for temporary demo wallets in this build.';
+    }
 
     function resetIdentities() {
       Object.keys(subjects).forEach(key => delete subjects[key]);
@@ -419,6 +584,7 @@ DEMO_HTML = r"""<!doctype html>
       document.querySelector('#wallet-heading').textContent = heading;
       document.querySelector('#trace-target').textContent = 'Wallet ready';
       resetIdentities();
+      resetAgeDemo();
     }
 
     function setWalletActionsBusy(busy) {
@@ -491,6 +657,79 @@ DEMO_HTML = r"""<!doctype html>
         connectButton.textContent = 'Connect local';
       } finally {
         connectButton.disabled = false;
+      }
+    });
+
+    issueAgeButton.addEventListener('click', async () => {
+      issueAgeButton.disabled = true;
+      issueAgeButton.textContent = 'Issuing...';
+      try {
+        const response = await fetch('/api/demo/age/credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ demo_session: demoSession })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Issuance failed');
+        renderWallet(result.wallet_state);
+        requestAgeButton.disabled = false;
+        issueAgeButton.textContent = 'Issue another credential';
+        document.querySelector('#age-state').textContent = 'Credential encrypted in wallet: age_over 13, 16, 18, 21.';
+      } catch (error) {
+        issueAgeButton.textContent = 'Simulate document check';
+        document.querySelector('#age-state').textContent = error.message;
+      } finally {
+        issueAgeButton.disabled = false;
+      }
+    });
+
+    requestAgeButton.addEventListener('click', async () => {
+      requestAgeButton.disabled = true;
+      try {
+        const response = await fetch('/api/demo/age/requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ demo_session: demoSession, service_id: 'shop.example', minimum_age: 18 })
+        });
+        pendingAgeRequest = await response.json();
+        if (!response.ok) throw new Error(pendingAgeRequest.detail || 'Request failed');
+        approveAgeButton.hidden = false;
+        document.querySelector('#age-state').textContent = 'shop.example requests age_over_18. Approve this one-time presentation?';
+      } catch (error) {
+        requestAgeButton.disabled = false;
+        document.querySelector('#age-state').textContent = error.message;
+      }
+    });
+
+    approveAgeButton.addEventListener('click', async () => {
+      approveAgeButton.disabled = true;
+      approveAgeButton.textContent = 'Presenting...';
+      try {
+        const response = await fetch('/api/demo/age/presentations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ demo_session: demoSession, request_id: pendingAgeRequest.request_id })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'Presentation failed');
+        const state = document.querySelector('#age-state');
+        state.className = 'age-state age-result';
+        state.textContent = `Verified by ${result.service_id}: ${result.claim} = true`;
+        approveAgeButton.hidden = true;
+        approveAgeButton.disabled = false;
+        approveAgeButton.textContent = 'Approve for shop.example';
+        requestAgeButton.disabled = false;
+        document.querySelector('#trace-target').textContent = result.service_id;
+        const steps = [...document.querySelectorAll('.step')];
+        result.steps.forEach((item, index) => {
+          steps[index].querySelector('strong').textContent = item.label;
+          steps[index].querySelector('small').textContent = item.detail;
+          steps[index].classList.add('complete');
+        });
+      } catch (error) {
+        approveAgeButton.disabled = false;
+        approveAgeButton.textContent = 'Approve for shop.example';
+        document.querySelector('#age-state').textContent = error.message;
       }
     });
 

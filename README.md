@@ -233,8 +233,9 @@ encrypted multi-device use:
 2. **Opaque encrypted synchronization**: planned.
 3. **Device identities, QR pairing, and revocation**: planned.
 4. **Browser authorization and wallet consent**: planned.
-5. **Reusable, privacy-preserving age assurance**: design and initial domain
-	boundary prepared; issuance and presentation are planned.
+5. **Reusable, privacy-preserving age assurance**: encrypted issuance, consent,
+	presentation, and replay defenses are runnable with an explicitly simulated
+	provider; production unlinkability remains gated on reviewed BBS holder binding.
 6. **Reduced provider correlation**: requires further protocol design.
 
 ## Documentation
@@ -252,6 +253,11 @@ verification, token issuance, and service audience checks to show one wallet
 receiving unrelated identities at two services. The provider API and standalone
 relying-service demo run beside it in the same Compose stack. The page can also
 connect to an existing host wallet through the consent-gated local bridge.
+
+The **Age assurance lab** on the same page demonstrates encrypted credential
+storage and a one-time `age_over_18` presentation. Its shared-HMAC adapter is
+clearly labeled as a simulation: it is not BBS and is not cryptographically
+unlinkable.
 
 ## Contributing and license
 

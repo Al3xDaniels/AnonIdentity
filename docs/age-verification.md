@@ -7,8 +7,10 @@ and then prove an age threshold to multiple services from the wallet. A relying
 service should learn only that its policy is satisfied, not the user's identity
 documents, birth date, exact age, wallet ID, or activity at other services.
 
-This capability is not implemented yet. This document defines the privacy and
-protocol boundaries that an implementation must preserve.
+An executable orchestration demo now covers encrypted issuance, local policy
+selection, explicit consent, presentation, and verifier replay protection. It
+uses a clearly labeled shared-HMAC simulation adapter and does not satisfy the
+production unlinkability or anonymous holder-binding requirements below.
 
 ## Terminology
 
@@ -85,9 +87,10 @@ must not reveal the wallet's root public key.
 
 A relying service needs a policy for trusted issuers, accepted credential types,
 minimum assurance, jurisdictions, expiry, and status. Issuer keys must be
-discoverable and rotatable. Suspension or revocation should use a
-privacy-preserving status mechanism rather than a unique online lookup that lets
-the issuer observe where a credential is presented.
+discoverable and rotatable. The initial profile uses short-lived credentials and
+expiry instead of suspension or revocation: conventional status-list indexes are
+stable correlators. A later status mechanism must prove non-revocation without
+revealing an index or causing a holder-specific online lookup.
 
 The wallet must support:
 
@@ -100,23 +103,26 @@ The wallet must support:
 
 ## Standards direction
 
-Issuance and presentation should use reviewed standards rather than a custom
-signature format. Likely building blocks include OpenID for Verifiable Credential
-Issuance and OpenID for Verifiable Presentations for transport, combined with a
-credential format that supports the unlinkability requirements above.
+The conditional format decision is W3C Data Integrity BBS `bbs-2023` with
+anonymous holder binding, transported with OpenID for Verifiable Credential
+Issuance 1.0 and OpenID for Verifiable Presentations 1.0. See
+[Age Credential Format Decision](age-credential-format-decision.md) for the
+comparison and threat model.
 
-Format selection remains an explicit design decision. Selective disclosure alone
-does not guarantee unlinkability: some formats hide claims while retaining a
-stable issuer-signed object. The chosen format must be tested for cross-verifier
-correlation, replay resistance, holder binding, offline verification, and status
-privacy before implementation.
+Cryptographic implementation remains blocked because anonymous holder binding is
+an at-risk Candidate Recommendation feature with draft Blind BBS dependencies.
+The project will integrate an independently reviewed implementation only after
+the interoperability gate in that decision is met. It will not implement custom
+BBS or blind-signature primitives.
 
 ## Implementation roadmap
 
-1. Define protocol-neutral age-proof requests and encrypted credential metadata:
-	initial domain types are prepared in `age_assurance.py`; issuance offers and
-	full trust policies remain.
-2. Select and threat-model a standards-based credential and presentation format.
+1. Define protocol-neutral age-proof requests, issuance offers, trust policies,
+	and encrypted credential metadata: initial domain types and local filtering
+	are prepared in `age_assurance.py`; issuance transport and status policy remain.
+2. Select and threat-model a standards-based credential and presentation format:
+	conditionally complete; implementation is gated on stable anonymous holder
+	binding dependencies and reviewed library support.
 3. Implement issuer discovery, key rotation, and privacy-preserving status checks.
 4. Add wallet issuance, encrypted storage, consent, and presentation flows.
 5. Add relying-service verification with audience and nonce enforcement.
@@ -129,3 +135,7 @@ The feature is not complete until two colluding services cannot match valid
 presentations using protocol-visible identifiers, the issuer cannot passively
 observe every presentation, and a service learns no more than the requested age
 threshold and necessary assurance information.
+
+The browser demo is intentionally excluded from those cryptographic acceptance
+criteria. Its `demo-simulated-proof-v1` format is a test fixture, not an
+implementation or interoperability claim for W3C Data Integrity BBS.

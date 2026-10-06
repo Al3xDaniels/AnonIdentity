@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from anon_identity.age_assurance import StoredAgeCredential
 from anon_identity.crypto import canonical_service_id
 from anon_identity.keyring_store import KWalletError, KWalletSettings, write_kwallet_document
 from anon_identity.wallet import Wallet, decode_bytes, encode_bytes
@@ -108,6 +109,47 @@ def record_service(path: Path, recovery_phrase: str, service_id: str, subject: s
         "label": existing.get("label", normalized_service),
     }
     persist_wallet_document(path, document, recovery_phrase, revision=revision + 1)
+
+
+def record_age_credential(
+    path: Path,
+    recovery_phrase: str,
+    credential: StoredAgeCredential,
+) -> None:
+    """Append an age credential to the encrypted wallet document."""
+    document, revision = _load_encrypted_document(path, recovery_phrase)
+    credentials = document.setdefault("age_credentials", [])
+    credentials.append(
+        {
+            "issuer": credential.issuer,
+            "format": credential.format,
+            "assurance_level": credential.assurance_level,
+            "jurisdiction": credential.jurisdiction,
+            "age_over": sorted(credential.age_over),
+            "expires_at": credential.expires_at,
+            "credential": credential.credential,
+        }
+    )
+    persist_wallet_document(path, document, recovery_phrase, revision=revision + 1)
+
+
+def load_age_credentials(
+    path: Path,
+    recovery_phrase: str,
+) -> list[StoredAgeCredential]:
+    document, _ = _load_encrypted_document(path, recovery_phrase)
+    return [
+        StoredAgeCredential(
+            issuer=item["issuer"],
+            format=item["format"],
+            assurance_level=item["assurance_level"],
+            jurisdiction=item["jurisdiction"],
+            age_over=frozenset(item["age_over"]),
+            expires_at=item["expires_at"],
+            credential=item["credential"],
+        )
+        for item in document.get("age_credentials", [])
+    ]
 
 
 def list_services(path: Path, recovery_phrase: str) -> dict[str, Any]:

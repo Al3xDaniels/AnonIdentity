@@ -9,6 +9,8 @@ from typing import Any, Protocol, cast
 
 from dbus_next.aio.message_bus import MessageBus
 
+from anon_identity.secure_storage import SecureStorageError, register_store
+
 KWALLET_SERVICE = "org.kde.kwalletd6"
 KWALLET_PATH = "/modules/kwalletd6"
 KWALLET_INTERFACE = "org.kde.KWallet"
@@ -28,7 +30,13 @@ class KWalletSettings:
     @classmethod
     def from_document(cls, document: dict[str, Any]) -> KWalletSettings | None:
         configuration = document.get("keyring")
-        if not configuration or configuration.get("backend") not in {"kwallet", "secret-service"}:
+        if not isinstance(configuration, dict):
+            return None
+        return cls.from_configuration(configuration)
+
+    @classmethod
+    def from_configuration(cls, configuration: dict[str, Any]) -> KWalletSettings | None:
+        if configuration.get("backend") != "kwallet":
             return None
         return cls(
             wallet=configuration.get("wallet", "kdewallet"),
@@ -47,6 +55,8 @@ class KWalletSettings:
 
 class KWalletClient(Protocol):
     def write_and_verify(self, settings: KWalletSettings, value: str) -> None: ...
+
+    def read(self, settings: KWalletSettings) -> str: ...
 
 
 class KWalletProxy(Protocol):
@@ -68,6 +78,9 @@ class NativeKWalletClient:
 
     def write_and_verify(self, settings: KWalletSettings, value: str) -> None:
         asyncio.run(self._write_and_verify(settings, value))
+
+    def read(self, settings: KWalletSettings) -> str:
+        return asyncio.run(self._read(settings))
 
     async def _write_and_verify(self, settings: KWalletSettings, value: str) -> None:
         try:
@@ -105,6 +118,59 @@ class NativeKWalletClient:
         except Exception as error:
             raise KWalletError(f"KWallet D-Bus operation failed: {error}") from error
 
+    async def _read(self, settings: KWalletSettings) -> str:
+        try:
+            bus = await MessageBus().connect()
+            introspection = await bus.introspect(KWALLET_SERVICE, KWALLET_PATH)
+            proxy = bus.get_proxy_object(KWALLET_SERVICE, KWALLET_PATH, introspection)
+            wallet = cast(KWalletProxy, proxy.get_interface(KWALLET_INTERFACE))
+            handle = await wallet.call_open(settings.wallet, 0, APPLICATION_ID)
+            if handle < 0:
+                raise KWalletError("KWallet could not be opened")
+            value = await wallet.call_read_password(
+                handle,
+                settings.folder,
+                settings.entry,
+                APPLICATION_ID,
+            )
+            if not value:
+                raise KWalletError(f"KWallet entry was empty or missing: {settings.entry}")
+            return value
+        except KWalletError:
+            raise
+        except Exception as error:
+            raise KWalletError(f"KWallet D-Bus operation failed: {error}") from error
+
+
+class KWalletEnvelopeStore:
+    """Provider-neutral adapter for encrypted envelopes stored in KWallet."""
+
+    backend = "kwallet"
+
+    def __init__(self, client: KWalletClient | None = None) -> None:
+        self.client = client or NativeKWalletClient()
+
+    def read(self, configuration: dict[str, Any]) -> dict[str, Any]:
+        settings = KWalletSettings.from_configuration(configuration)
+        if settings is None:
+            raise SecureStorageError("invalid KWallet configuration")
+        try:
+            document = json.loads(self.client.read(settings))
+        except (KWalletError, json.JSONDecodeError) as error:
+            raise SecureStorageError(f"could not read KWallet envelope: {error}") from error
+        if not isinstance(document, dict):
+            raise SecureStorageError("KWallet entry is not a JSON object")
+        return document
+
+    def write(self, configuration: dict[str, Any], envelope: dict[str, Any]) -> None:
+        settings = KWalletSettings.from_configuration(configuration)
+        if settings is None:
+            raise SecureStorageError("invalid KWallet configuration")
+        try:
+            self.client.write_and_verify(settings, json.dumps(envelope, indent=2))
+        except KWalletError as error:
+            raise SecureStorageError(f"could not write KWallet envelope: {error}") from error
+
 
 def write_kwallet_document(
     document: dict[str, Any],
@@ -118,3 +184,6 @@ def write_kwallet_document(
     """
     serialized_document = json.dumps(document, indent=2)
     (client or NativeKWalletClient()).write_and_verify(settings, serialized_document)
+
+
+register_store("kwallet", KWalletEnvelopeStore)

@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from anon_identity.wallet import Wallet, encode_bytes
 from anon_identity.web_demo import create_app
 
 ISSUER_SECRET = "test-only-secret-that-is-at-least-32-characters"
@@ -15,6 +16,7 @@ def test_visual_demo_serves_interactive_page(tmp_path) -> None:
     assert "forum.example" in response.text
     assert "shop.example" in response.text
     assert "Current wallet state" in response.text
+    assert "Approve in bridge terminal" in response.text
 
 
 def test_visual_demo_produces_stable_distinct_service_identities(tmp_path) -> None:
@@ -59,3 +61,41 @@ def test_visual_demo_rejects_an_unknown_wallet(tmp_path) -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_connected_wallet_completes_provider_flow(tmp_path) -> None:
+    client = TestClient(create_app(str(tmp_path / "demo.db"), ISSUER_SECRET))
+    wallet = Wallet.generate()
+    challenge_response = client.post(
+        "/api/connected/challenge",
+        json={
+            "wallet_id": wallet.wallet_id,
+            "root_public_key": encode_bytes(wallet.root_public_key),
+            "service_id": "forum.example",
+        },
+    )
+    challenge = challenge_response.json()
+    proof = wallet.prove(
+        challenge["challenge_id"],
+        challenge["challenge"],
+        challenge["service_id"],
+    )
+
+    response = client.post(
+        "/api/connected/verify",
+        json={
+            "challenge_id": challenge["challenge_id"],
+            "service_id": challenge["service_id"],
+            "subject": proof.subject,
+            "pairwise_public_key": proof.pairwise_public_key,
+            "root_attestation": proof.root_attestation,
+            "challenge_signature": proof.challenge_signature,
+        },
+    )
+
+    assert challenge_response.status_code == 201
+    assert response.status_code == 200
+    assert response.json() == {
+        "service_id": "forum.example",
+        "subject": proof.subject,
+    }

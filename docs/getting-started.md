@@ -123,6 +123,13 @@ KDE Wallet integration intentionally runs on the host because it needs the
 user's desktop D-Bus session. Install the local development environment before
 using those two commands.
 
+## Connect an existing wallet to the visual demo
+
+The optional localhost bridge supports encrypted files, KWallet, and external
+secure-storage plugins through one interface. It intentionally runs on the host
+so Docker and websites never receive wallet secrets. See the
+[local wallet bridge guide](wallet-bridge.md) for setup and adapter details.
+
 ## Optional local development
 
 Docker runs every portable demo component. A local environment is needed only

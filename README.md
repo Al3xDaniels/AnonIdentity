@@ -241,6 +241,7 @@ encrypted multi-device use:
 
 - [Getting started and command reference](docs/getting-started.md)
 - [Encrypted wallet format and threat model](docs/wallet-format.md)
+- [Local wallet bridge and storage adapters](docs/wallet-bridge.md)
 - [Age assurance design](docs/age-verification.md)
 
 ## Visual demo
@@ -249,7 +250,8 @@ Run `docker compose up --build --wait` and open <http://localhost:8002>. The
 interactive POC uses the real wallet derivation, provider challenge, proof
 verification, token issuance, and service audience checks to show one wallet
 receiving unrelated identities at two services. The provider API and standalone
-relying-service demo run beside it in the same Compose stack.
+relying-service demo run beside it in the same Compose stack. The page can also
+connect to an existing host wallet through the consent-gated local bridge.
 
 ## Contributing and license
 

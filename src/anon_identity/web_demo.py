@@ -15,10 +15,10 @@ from pydantic import BaseModel
 from anon_identity.cli import load_wallet, record_service, save_wallet
 from anon_identity.demo_service import validate_token
 from anon_identity.provider import AuthenticationError, IdentityProvider
-from anon_identity.wallet import Wallet, encode_bytes
+from anon_identity.wallet import Wallet, WalletProof, encode_bytes
 from anon_identity.wallet_encryption import (
-  decrypt_wallet_document,
-  recovery_phrase_for_wallet,
+    decrypt_wallet_document,
+    recovery_phrase_for_wallet,
 )
 
 
@@ -27,23 +27,38 @@ class AuthenticationRequest(BaseModel):
     service_id: str
 
 
+class ConnectedChallengeRequest(BaseModel):
+    wallet_id: str
+    root_public_key: str
+    service_id: str
+
+
+class ConnectedProofRequest(BaseModel):
+    challenge_id: str
+    service_id: str
+    subject: str
+    pairwise_public_key: str
+    root_attestation: str
+    challenge_signature: str
+
+
 def _short(value: str, visible: int = 12) -> str:
     return value if len(value) <= visible * 2 else f"{value[:visible]}...{value[-visible:]}"
 
 
 def _wallet_views(path: Path, recovery_phrase: str, wallet: Wallet) -> dict[str, object]:
-  envelope = json.loads(path.read_text())
-  document = decrypt_wallet_document(envelope, recovery_phrase)
-  encrypted_view = {**envelope, "ciphertext": _short(envelope["ciphertext"], 24)}
-  return {
-    "revision": envelope["revision"],
-    "logical": {
-      "wallet_id": wallet.wallet_id,
-      "services": document.get("services", {}),
-      "root_secret": "[hidden]",
-    },
-    "encrypted": encrypted_view,
-  }
+    envelope = json.loads(path.read_text())
+    document = decrypt_wallet_document(envelope, recovery_phrase)
+    encrypted_view = {**envelope, "ciphertext": _short(envelope["ciphertext"], 24)}
+    return {
+        "revision": envelope["revision"],
+        "logical": {
+            "wallet_id": wallet.wallet_id,
+            "services": document.get("services", {}),
+            "root_secret": "[hidden]",
+        },
+        "encrypted": encrypted_view,
+    }
 
 
 def create_app(
@@ -107,8 +122,8 @@ def create_app(
             token = provider.verify(challenge.challenge_id, proof)
             session = validate_token(token, challenge.service_id, resolved_secret)
             record_service(
-              wallet_file,
-              phrase,
+                wallet_file,
+                phrase,
                 session["service_id"],
                 session["anonymous_subject"],
             )
@@ -141,6 +156,40 @@ def create_app(
                 key: _short(value) for key, value in asdict(proof).items()
             },
             "wallet_state": _wallet_views(wallet_file, phrase, wallet),
+        }
+
+    @app.post("/api/connected/challenge", status_code=status.HTTP_201_CREATED)
+    def issue_connected_challenge(request: ConnectedChallengeRequest) -> dict[str, str | int]:
+        """Enroll public wallet data and issue a challenge for local signing."""
+        try:
+            provider.enroll(request.wallet_id, request.root_public_key)
+            challenge = provider.create_challenge(request.wallet_id, request.service_id)
+        except (AuthenticationError, ValueError) as error:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error)) from error
+        return {
+            "challenge_id": challenge.challenge_id,
+            "challenge": challenge.challenge,
+            "service_id": challenge.service_id,
+            "expires_at": challenge.expires_at,
+        }
+
+    @app.post("/api/connected/verify")
+    def verify_connected_proof(request: ConnectedProofRequest) -> dict[str, str]:
+        """Verify a bridge-created proof and validate its relying-service token."""
+        proof = WalletProof(
+            subject=request.subject,
+            pairwise_public_key=request.pairwise_public_key,
+            root_attestation=request.root_attestation,
+            challenge_signature=request.challenge_signature,
+        )
+        try:
+            token = provider.verify(request.challenge_id, proof)
+            session = validate_token(token, request.service_id, resolved_secret)
+        except (AuthenticationError, ValueError) as error:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(error)) from error
+        return {
+            "service_id": session["service_id"],
+            "subject": session["anonymous_subject"],
         }
 
     return app
@@ -196,6 +245,11 @@ DEMO_HTML = r"""<!doctype html>
     h2 { margin: 12px 0 20px; font: 700 28px/1.1 Georgia, serif; letter-spacing: 0; }
     .primary { min-height: 46px; padding: 0 18px; border: 0; border-radius: 5px; color: white; background: var(--green); font-weight: 700; cursor: pointer; }
     .primary:hover { background: #0e5941; }
+    .wallet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .wallet-actions button { min-height: 46px; padding: 0 12px; border-radius: 5px; font-weight: 700; cursor: pointer; }
+    .secondary { border: 1px solid var(--ink); color: var(--ink); background: transparent; }
+    .secondary:hover { color: white; background: var(--ink); }
+    .bridge-state { min-height: 18px; margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .facts { display: grid; gap: 16px; margin-top: 25px; }
     .fact span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
@@ -273,8 +327,12 @@ DEMO_HTML = r"""<!doctype html>
     <section class="workspace">
       <div class="panel wallet">
         <div class="panel-label">User device</div>
-        <h2>Ephemeral wallet</h2>
-        <button class="primary" id="create-wallet">Create demo wallet</button>
+        <h2 id="wallet-heading">Choose a wallet</h2>
+        <div class="wallet-actions">
+          <button class="primary" id="create-wallet">Temporary</button>
+          <button class="secondary" id="connect-wallet">Connect local</button>
+        </div>
+        <p class="bridge-state" id="bridge-state">Local wallets require the host bridge on port 8765.</p>
         <div class="facts" id="wallet-facts" hidden>
           <div class="fact"><span>Wallet identifier</span><code id="wallet-id"></code></div>
           <div class="fact"><span>Root public key</span><code id="root-key"></code></div>
@@ -335,10 +393,39 @@ DEMO_HTML = r"""<!doctype html>
   </main>
   <script>
     let demoSession = null;
+    let walletMode = null;
+    let connectedWallet = null;
     const subjects = {};
     const previousWalletLines = { logical: [], encrypted: [] };
     const createButton = document.querySelector('#create-wallet');
+    const connectButton = document.querySelector('#connect-wallet');
     const serviceButtons = [...document.querySelectorAll('[data-service]')];
+
+    function resetIdentities() {
+      Object.keys(subjects).forEach(key => delete subjects[key]);
+      document.querySelector('#forum-subject').textContent = 'Waiting for proof';
+      document.querySelector('#shop-subject').textContent = 'Waiting for proof';
+      document.querySelector('#comparison').style.display = 'none';
+      serviceButtons.forEach(button => {
+        button.disabled = false;
+        button.textContent = 'Authenticate';
+      });
+    }
+
+    function showWallet(walletId, rootPublicKey, heading) {
+      document.querySelector('#wallet-id').textContent = walletId;
+      document.querySelector('#root-key').textContent = rootPublicKey;
+      document.querySelector('#wallet-facts').hidden = false;
+      document.querySelector('#wallet-heading').textContent = heading;
+      document.querySelector('#trace-target').textContent = 'Wallet ready';
+      resetIdentities();
+    }
+
+    function setWalletActionsBusy(busy) {
+      createButton.disabled = busy;
+      connectButton.disabled = busy;
+      serviceButtons.forEach(serviceButton => serviceButton.disabled = busy);
+    }
 
     function renderJson(targetId, value, viewName) {
       const target = document.querySelector(`#${targetId}`);
@@ -368,10 +455,10 @@ DEMO_HTML = r"""<!doctype html>
         if (!response.ok) throw new Error('Wallet creation failed');
         const wallet = await response.json();
         demoSession = wallet.demo_session;
-        document.querySelector('#wallet-id').textContent = wallet.wallet_id;
-        document.querySelector('#root-key').textContent = wallet.root_public_key;
-        document.querySelector('#wallet-facts').hidden = false;
-        document.querySelector('#trace-target').textContent = 'Wallet ready';
+        walletMode = 'temporary';
+        connectedWallet = null;
+        showWallet(wallet.wallet_id, wallet.root_public_key, 'Temporary wallet');
+        document.querySelector('#bridge-state').textContent = 'Encrypted inside the Docker demo volume.';
         previousWalletLines.logical = [];
         previousWalletLines.encrypted = [];
         renderWallet(wallet.wallet_state);
@@ -384,20 +471,90 @@ DEMO_HTML = r"""<!doctype html>
       }
     });
 
+    connectButton.addEventListener('click', async () => {
+      connectButton.disabled = true;
+      connectButton.textContent = 'Connecting...';
+      try {
+        const response = await fetch('http://127.0.0.1:8765/v1/wallet');
+        if (!response.ok) throw new Error('Bridge refused connection');
+        connectedWallet = await response.json();
+        walletMode = 'connected';
+        demoSession = null;
+        showWallet(connectedWallet.wallet_id, connectedWallet.root_public_key, 'Local wallet');
+        document.querySelector('#bridge-state').textContent = `Connected through ${connectedWallet.storage_backend} storage.`;
+        document.querySelector('#wallet-revision').textContent = 'Private';
+        document.querySelector('#logical-wallet').textContent = 'Wallet contents remain in the local bridge.';
+        document.querySelector('#encrypted-wallet').textContent = 'Encrypted envelope is not sent to this website.';
+        connectButton.textContent = 'Reconnect';
+      } catch (error) {
+        document.querySelector('#bridge-state').textContent = 'Bridge unavailable. Start anon-wallet-bridge on this device.';
+        connectButton.textContent = 'Connect local';
+      } finally {
+        connectButton.disabled = false;
+      }
+    });
+
+    async function authenticateConnectedWallet(serviceId) {
+      const challengeResponse = await fetch('/api/connected/challenge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_id: connectedWallet.wallet_id,
+          root_public_key: connectedWallet.root_public_key,
+          service_id: serviceId
+        })
+      });
+      const challenge = await challengeResponse.json();
+      if (!challengeResponse.ok) throw new Error(challenge.detail || 'Challenge failed');
+
+      const proofResponse = await fetch('http://127.0.0.1:8765/v1/proofs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(challenge)
+      });
+      const proof = await proofResponse.json();
+      if (!proofResponse.ok) throw new Error(proof.detail || 'Wallet denied request');
+
+      const verifyResponse = await fetch('/api/connected/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ challenge_id: challenge.challenge_id, service_id: serviceId, ...proof })
+      });
+      const result = await verifyResponse.json();
+      if (!verifyResponse.ok) throw new Error(result.detail || 'Proof verification failed');
+      return {
+        ...result,
+        steps: [
+          { label: 'Challenge created', detail: 'Provider issued a one-time nonce' },
+          { label: 'Local approval', detail: 'Host bridge approved the service-bound request' },
+          { label: 'Proof verified', detail: 'Provider checked both Ed25519 signatures' },
+          { label: 'Scoped token accepted', detail: `Audience locked to ${serviceId}` }
+        ]
+      };
+    }
+
     serviceButtons.forEach(button => button.addEventListener('click', async () => {
       const serviceId = button.dataset.service;
-      button.disabled = true;
+      setWalletActionsBusy(true);
       button.textContent = 'Signing...';
       document.querySelector('#trace-target').textContent = serviceId;
       document.querySelectorAll('.step').forEach(step => step.classList.remove('complete'));
       try {
-        const response = await fetch('/api/demo/authenticate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ demo_session: demoSession, service_id: serviceId })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.detail || 'Authentication failed');
+        let result;
+        if (walletMode === 'connected') {
+          button.textContent = 'Approve in bridge terminal';
+          document.querySelector('#bridge-state').textContent = `Approval required for ${serviceId}. Check the bridge terminal.`;
+          result = await authenticateConnectedWallet(serviceId);
+          document.querySelector('#bridge-state').textContent = `Connected through ${connectedWallet.storage_backend} storage.`;
+        } else {
+          const response = await fetch('/api/demo/authenticate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ demo_session: demoSession, service_id: serviceId })
+          });
+          result = await response.json();
+          if (!response.ok) throw new Error(result.detail || 'Authentication failed');
+        }
         const steps = [...document.querySelectorAll('.step')];
         result.steps.forEach((item, index) => {
           steps[index].querySelector('strong').textContent = item.label;
@@ -406,7 +563,7 @@ DEMO_HTML = r"""<!doctype html>
         });
         subjects[serviceId] = result.subject;
         document.querySelector(`#${serviceId.startsWith('forum') ? 'forum' : 'shop'}-subject`).textContent = result.subject;
-        renderWallet(result.wallet_state);
+        if (result.wallet_state) renderWallet(result.wallet_state);
         if (subjects['forum.example'] && subjects['shop.example']) {
           document.querySelector('#comparison').style.display = 'block';
         }
@@ -414,7 +571,7 @@ DEMO_HTML = r"""<!doctype html>
       } catch (error) {
         button.textContent = error.message;
       } finally {
-        button.disabled = false;
+        setWalletActionsBusy(false);
       }
     }));
   </script>

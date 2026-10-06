@@ -4,7 +4,7 @@ from threading import Event
 
 from fastapi.testclient import TestClient
 
-from anon_identity.cli import save_wallet
+from anon_identity.wallet_documents import save_wallet
 from anon_identity.wallet import Wallet, encode_bytes
 from anon_identity.wallet_bridge import create_bridge_app
 from anon_identity.wallet_encryption import recovery_phrase_for_wallet

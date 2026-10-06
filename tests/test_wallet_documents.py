@@ -1,6 +1,6 @@
 import json
 
-from anon_identity.cli import (
+from anon_identity.wallet_documents import (
     enable_keyring,
     list_services,
     load_wallet,
@@ -77,7 +77,7 @@ def test_enabling_keyring_adds_configuration_after_successful_write(tmp_path, mo
     save_wallet(path, wallet, recovery_phrase)
     mirrored_documents = []
     monkeypatch.setattr(
-        "anon_identity.cli.write_kwallet_document",
+        "anon_identity.wallet_documents.write_kwallet_document",
         lambda document, settings: mirrored_documents.append(document.copy()),
     )
 

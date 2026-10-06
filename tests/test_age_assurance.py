@@ -11,7 +11,7 @@ from anon_identity.age_assurance import (
     StoredAgeCredential,
     select_age_credential,
 )
-from anon_identity.cli import load_age_credentials, record_age_credential, save_wallet
+from anon_identity.wallet_documents import load_age_credentials, record_age_credential, save_wallet
 from anon_identity.wallet import Wallet
 from anon_identity.wallet_encryption import decrypt_wallet_document, recovery_phrase_for_wallet
 
